@@ -1,0 +1,89 @@
+# NeoCMake
+
+Select a CMake preset, build a target, and launch an executable from Neovim. Build and launch targets have separate selectors, so you can keep working on a shared library and run the application that uses it. Selections persist per project across Neovim sessions.
+
+## Try the example
+
+Open the sample from this checkout with the plugin installed.
+
+```sh
+nvim examples/workflow/src/base.cpp
+```
+
+1. Press `<leader>mp` and choose **Debug**. CMake configures the project and publishes its compiler flags for clangd.
+2. Press `<leader>mt`, choose **base**, then press `<leader>mb` to build that library.
+3. Press `<leader>ml`, choose **hello_extended**, then press `<leader>mr`. The executable builds with its dependencies and prints `extended: 42` in a terminal split. The other executable, **hello_base**, prints `base: 21`.
+4. Press `<leader>mi` to build and install both applications, both shared libraries, and their headers under `examples/workflow/stage/debug/`.
+
+The default picker is a floating list. Move with `j` / `k` or the arrows, search with `/`, confirm with Enter, and cancel with Escape. In a running program's terminal, use `<C-\><C-n>` to return to Normal mode.
+
+## Commands and mappings
+
+Every Normal-mode shortcut starts with `<leader>m` by default. The table gives the next key.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| `p` | `:CMakePreset` | Choose a configure preset and configure it |
+| `P` | `:CMakeBuildPreset` | Choose a compatible build preset or default build settings |
+| `k` | `:CMakeConfiguration` | Choose a configuration for a multi-config generator when the build preset leaves it open |
+| `c` | `:CMakeConfigure` | Configure again, for example after editing presets or adding targets |
+| `t` | `:CMakeTarget` | Choose a build target or restore the preset's default targets |
+| `b` | `:CMakeBuild` | Build the selection |
+| `l` | `:CMakeLaunchTarget` | Choose an executable |
+| `r` | `:CMakeRun [args...]` | Build the launch target and run it in an interactive terminal |
+| `i` | `:CMakeInstall [prefix]` | Build all default targets and run `cmake --install` |
+| `s` | `:CMakeStatus` | Show the project, presets, targets, configuration, and activity |
+| `o` | `:CMakeLog` | Open the project's CMake output |
+| `x` | `:CMakeStop` | Stop the current CMake subprocess |
+
+Run arguments use Neovim command argument escaping, for example `:CMakeRun --name Ada\ Lovelace`. Programs start in the project root with the configure preset's environment. Install uses the configured prefix unless you supply one, for example `:CMakeInstall ./stage/local`.
+
+## Installation and configuration
+
+Use Neovim 0.12, CMake 3.23 or newer, a C++ compiler, and the build tool selected by your project. The example uses Ninja. Enable clangd in your Neovim LSP configuration for completion, hover, and live analysis. The plugin uses the existing client configuration.
+
+For a local checkout with lazy.nvim, add this plugin spec.
+
+```lua
+return {
+  dir = vim.fn.expand("~/NeovimCmake"),
+  main = "neocmake",
+  opts = { prefix = "<leader>m" },
+}
+```
+
+With a native Neovim package installation, the plugin loads with its defaults. To customize it, call setup from your configuration.
+
+```lua
+require("neocmake").setup({
+  prefix = "<leader>m",     -- Set to false for commands only
+  cmake = "cmake",          -- Executable name or absolute path
+  build_dir = "build",      -- Used for projects without presets
+  save_before_build = true, -- Save modified project buffers before configure/build
+  -- select = vim.ui.select, -- Use your UI picker, e.g. Snacks, instead of the built-in float
+})
+```
+
+The current file identifies the project. NeoCMake looks up its directory tree for a presets file or the top-level CMakeLists.txt within the repository. Commands also work from an empty buffer when Neovim's working directory is inside the project. Build, run, and install configure the project on first use. CMake evaluates preset visibility and runs the selected presets. Target names and artifact paths come from the CMake File API. A new preset build tree can require a second configure pass to obtain its first target model. [VS Code CMake Tools preset workflow](https://github.com/microsoft/vscode-cmake-tools/blob/main/docs/cmake-presets.md) · [CMake File API](https://cmake.org/cmake/help/latest/manual/cmake-file-api.7.html)
+
+## Compiler flags and build diagnostics
+
+NeoCMake enables `CMAKE_EXPORT_COMPILE_COMMANDS` and publishes the active database as `compile_commands.json` in the project root. With Ninja Multi-Config it filters the commands to the selected configuration. Open clangd buffers pick up changed compiler flags after configure or build. If you maintain your own root database or symlink, NeoCMake preserves it and directs clangd to the active build database. Use a Ninja or Makefiles generator for compilation database export. [CMake compilation database support](https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_COMPILE_COMMANDS.html) · [How clangd uses compile commands](https://clangd.llvm.org/design/compile-commands)
+
+GCC, Clang, MSVC, and CMake messages with source locations appear as Neovim diagnostics and quickfix entries. Use `:copen` to see them and `:cnext` to jump. A successful rebuild replaces stale build diagnostics. Failures without a source location, including many linker errors, retain their text in the output and quickfix list.
+
+## Verification
+
+From the repository root, run the end-to-end test against a temporary copy of the sample.
+
+```sh
+nvim --headless -u NONE -i NONE -c 'luafile tests/integration.lua'
+```
+
+To also query your configured clangd for a macro defined only by the newly selected preset, run the same test with your normal configuration.
+
+```sh
+NEOCMAKE_LOCAL_LSP=1 nvim --headless -i NONE -c 'luafile tests/integration.lua'
+```
+
+The Linux integration test drives the preset picker, selects build and launch targets, runs both executables, checks installed artifacts, introduces a compiler error, and verifies its quickfix location and removal. It also exercises inherited user presets, Ninja Multi-Config, paths containing spaces, and a project without presets. The CMake example uses `SHARED` libraries, which produce DLLs on Windows and shared objects on Linux.
