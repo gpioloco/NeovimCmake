@@ -89,6 +89,25 @@ function M.query(dir)
   return true
 end
 
+-- Some projects publish a restricted list of build types in the cache for
+-- cmake-gui. Otherwise use CMake's standard types plus the current value.
+function M.build_types(dir, current)
+  local names = { "Debug", "Release", "RelWithDebInfo", "MinSizeRel", "" }
+  for _, line in ipairs(vim.fn.readfile(dir .. "/CMakeCache.txt")) do
+    local values = line:match("^CMAKE_BUILD_TYPE%-STRINGS:INTERNAL=(.+)$")
+    if values then
+      names = vim.split(values, ";", { plain = true, trimempty = true })
+      break
+    end
+  end
+  if not vim.tbl_contains(names, current) then
+    table.insert(names, current)
+  end
+  return vim.tbl_map(function(name)
+    return { name = name, label = name == "" and "(No build type)" or name }
+  end, names)
+end
+
 function M.model(dir, previous)
   local reply = dir .. "/.cmake/api/v1/reply/"
   local indices = {}

@@ -22,6 +22,7 @@ end
 local function select_preset(p)
   local lines = exec(p, { "--list-presets=configure" }, "list configure presets")
   local item = task.choose(p, opts, presets.list(lines), "Configure preset", p.saved.preset)
+  p.saved.build_type = nil
   if item.name ~= p.saved.preset then
     p.saved.preset, p.saved.build_preset, p.saved.configuration = item.name, nil, nil
     p.saved.target, p.saved.launch, p.saved.dir, p.model = nil, nil, nil, nil
@@ -35,9 +36,9 @@ local function configuration(p)
     return configs[1]
   end
   local name = p.saved.configuration
-  if p.saved.build_preset then
+  if not name and p.saved.build_preset then
     local _, from_preset = p.presets.build(p.saved.build_preset)
-    name = from_preset or name
+    name = from_preset
   end
   if not name then
     return configs[1]
@@ -83,7 +84,7 @@ local function save_buffers(p)
   end
 end
 
-local function configure(p)
+local function configure(p, requested_type)
   save_buffers(p)
   p.model = nil
   local use_preset = project.has_presets(p.root)
@@ -99,6 +100,10 @@ local function configure(p)
     p.saved.preset, p.saved.build_preset = nil, nil
     dir = project.path(p.root, opts.build_dir)
     vim.list_extend(args, { "-B", dir })
+  end
+  local build_type = requested_type or p.saved.build_type
+  if build_type ~= nil then
+    table.insert(args, "-DCMAKE_BUILD_TYPE:STRING=" .. build_type)
   end
   if dir then
     project.query(dir)
@@ -128,13 +133,15 @@ local function ensure(p)
   end
 end
 
-function actions.Preset(p)
+function actions.ConfigurePreset(p)
   save_buffers(p)
   assert(project.has_presets(p.root), "This project has no CMake presets. Use :CMakeConfigure.")
   select_preset(p)
   configure(p)
 end
-actions.Configure = configure
+function actions.Configure(p)
+  configure(p)
+end
 
 function actions.BuildPreset(p)
   ensure(p)
@@ -149,24 +156,36 @@ function actions.BuildPreset(p)
   end
   p.saved.build_preset = task.choose(p, opts, items, "Build preset", p.saved.build_preset).name
   p.saved.target = nil
+  p.saved.configuration = nil
   refresh(p)
 end
 
-function actions.Configuration(p)
+function actions.BuildConfiguration(p)
   ensure(p)
-  if p.saved.build_preset then
-    local _, fixed = p.presets.build(p.saved.build_preset)
-    assert(not fixed, "Build preset " .. p.saved.build_preset .. " selects " .. tostring(fixed))
+  local current = configuration(p).name
+  local multi = p.model.generator.multiConfig
+  local items = multi and p.model.configurations or project.build_types(p.saved.dir, current)
+  local selected = task.choose(p, opts, items, "Build configuration", current).name
+  if selected == current then
+    return
   end
-  assert(p.model.generator.multiConfig, "The configure preset or CMAKE_BUILD_TYPE selects this configuration")
-  p.saved.configuration = task.choose(
-    p,
-    opts,
-    p.model.configurations,
-    "Build configuration",
-    p.saved.configuration or p.model.configurations[1].name
-  ).name
-  refresh(p)
+  if multi then
+    p.saved.configuration = selected
+    refresh(p)
+  else
+    p.task.show_output = true
+    configure(p, selected)
+    local actual = configuration(p).name
+    assert(
+      actual == selected,
+      ("CMake selected %q after requesting %q. Check the project's CMAKE_BUILD_TYPE settings."):format(
+        actual,
+        selected
+      )
+    )
+    p.saved.build_type = selected
+    project.save(p)
+  end
 end
 
 local function select_target(p, launch)
@@ -183,16 +202,16 @@ local function select_target(p, launch)
     end
   end
   local key = launch and "launch" or "target"
-  local selected = task.choose(p, opts, items, launch and "Launch target" or "Build target", p.saved[key])
+  local selected = task.choose(p, opts, items, launch and "Run target" or "Build target", p.saved[key])
   p.saved[key] = selected.name
   project.save(p)
   return targets[selected.name]
 end
 
-function actions.Target(p)
+function actions.BuildTarget(p)
   select_target(p, false)
 end
-function actions.LaunchTarget(p)
+function actions.RunTarget(p)
   select_target(p, true)
 end
 
@@ -247,7 +266,7 @@ function actions.Run(p, args)
   vim.cmd("startinsert")
 end
 
-function actions.Install(p, args)
+function actions.BuildInstall(p, args)
   ensure(p)
   local gen = p.model.generator.name
   build(p, (gen:match("Visual Studio") or gen == "Xcode") and "ALL_BUILD" or "all")
@@ -259,19 +278,20 @@ function actions.Install(p, args)
   exec(p, cmd, "install", nil, p.env)
 end
 
+-- Keep the old Ex names as aliases for existing mappings and scripts.
 local keys = {
-  { "p", "Preset", "Select configure preset" },
-  { "P", "BuildPreset", "Select build preset" },
-  { "c", "Configure", "Configure" },
-  { "t", "Target", "Select build target" },
-  { "l", "LaunchTarget", "Select launch target" },
-  { "k", "Configuration", "Select build configuration" },
-  { "b", "Build", "Build" },
-  { "r", "Run", "Build and run" },
-  { "i", "Install", "Build and install" },
-  { "o", "Log", "Show output" },
-  { "s", "Status", "Show selections" },
-  { "x", "Stop", "Stop CMake job" },
+  { "p", "ConfigurePreset", "Configure · Select preset", "Preset" },
+  { "P", "BuildPreset", "Build · Select preset" },
+  { "c", "Configure", "Configure · Configure project" },
+  { "t", "BuildTarget", "Build · Select target", "Target" },
+  { "l", "RunTarget", "Run · Select executable", "LaunchTarget" },
+  { "k", "BuildConfiguration", "Build · Select configuration", "Configuration" },
+  { "b", "Build", "Build · Build target" },
+  { "r", "Run", "Run · Launch executable" },
+  { "i", "BuildInstall", "Build · Install", "Install" },
+  { "o", "BuildLog", "Build · Show output", "Log" },
+  { "s", "Status", "Show project status" },
+  { "x", "BuildStop", "Build · Stop current CMake job", "Stop" },
 }
 local installed = {}
 
@@ -286,10 +306,10 @@ end
 
 local function invoke(name, args)
   local p = project.current()
-  if name == "Log" then
+  if name == "BuildLog" then
     return output.show(p)
   end
-  if name == "Stop" then
+  if name == "BuildStop" then
     if p.task and p.task.job then
       p.task.stopped = true
       vim.fn.jobstop(p.task.job)
@@ -308,18 +328,25 @@ local function invoke(name, args)
         "Build target: " .. (s.target or "default"),
         "Launch target: " .. (s.launch or "unselected"),
         "Build tree: " .. (s.dir or "unconfigured"),
-        "Configuration: " .. (p.model and configuration(p).name or s.configuration or "default"),
+        "Configuration: "
+          .. (p.model and configuration(p).name or s.configuration or s.build_type or "default"),
         "Activity: " .. (p.task and p.task.action or "idle"),
       }, "\n"),
       nil,
       { title = "CMake" }
     )
   end
-  task.start(p, name, function()
-    output.clear(p)
+  local title = name:gsub("(%l)(%u)", function(last, next_word)
+    return last .. " " .. next_word:lower()
+  end)
+  task.start(p, title, function()
+    p.task.show_output = name == "Build"
+      or name == "BuildInstall"
+      or name == "Configure"
+      or name == "ConfigurePreset"
     actions[name](p, args)
-    if name ~= "Run" then
-      vim.notify("CMake " .. name .. " complete", vim.log.levels.INFO)
+    if name ~= "Run" and not p.task.preview then
+      vim.notify("CMake " .. title .. " complete", vim.log.levels.INFO)
     end
   end)
 end
@@ -331,22 +358,23 @@ function M.setup(options)
   end
   installed = {}
   for _, spec in ipairs(keys) do
-    local suffix, name, description = unpack(spec)
-    local nargs = name == "Run" and "*" or (name == "Install" and "?" or 0)
-    vim.api.nvim_create_user_command("CMake" .. name, function(args)
+    local suffix, name, description, alias = unpack(spec)
+    local nargs = name == "Run" and "*" or (name == "BuildInstall" and "?" or 0)
+    local function callback(args)
       local ok, err = pcall(invoke, name, args)
       if not ok then
         vim.notify(tostring(err), vim.log.levels.ERROR)
       end
-    end, { nargs = nargs, complete = name == "Install" and "dir" or nil, desc = description, force = true })
+    end
+    local options =
+      { nargs = nargs, complete = name == "BuildInstall" and "dir" or nil, desc = description, force = true }
+    vim.api.nvim_create_user_command("CMake" .. name, callback, options)
+    if alias then
+      vim.api.nvim_create_user_command("CMake" .. alias, callback, options)
+    end
     if opts.prefix then
       local lhs = opts.prefix .. suffix
-      vim.keymap.set(
-        "n",
-        lhs,
-        "<Cmd>CMake" .. name .. "<CR>",
-        { desc = "CMake: " .. description, silent = true }
-      )
+      vim.keymap.set("n", lhs, "<Cmd>CMake" .. name .. "<CR>", { desc = description, silent = true })
       table.insert(installed, lhs)
     end
   end

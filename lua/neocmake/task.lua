@@ -15,11 +15,18 @@ function M.start(p, action, fn)
   function task.resume(...)
     local ok, err = coroutine.resume(thread, ...)
     if not ok or coroutine.status(thread) == "dead" then
-      p.task = nil
-      if not ok and err ~= cancelled then
-        p.error = tostring(err)
-        vim.notify(p.error, vim.log.levels.ERROR, { title = "CMake " .. action })
+      local message = action .. " complete"
+      if not ok then
+        message = err == cancelled and (action .. " cancelled") or tostring(err)
+        if err ~= cancelled then
+          p.error = message
+          if not task.preview or not vim.api.nvim_buf_is_loaded(task.preview.buf) then
+            vim.notify(message, vim.log.levels.ERROR, { title = "CMake " .. action })
+          end
+        end
       end
+      output.finish(p, message)
+      p.task = nil
     end
   end
   p.error = nil
@@ -48,14 +55,21 @@ function M.choose(p, options, items, prompt, current)
 end
 
 function M.exec(p, args, title, diagnostic_dir, env)
+  local capture = diagnostic_dir ~= nil or title == "install"
+  local command = "$ " .. table.concat(vim.tbl_map(vim.fn.shellescape, args), " ")
+  if capture then
+    output.begin(p, p.task.show_output)
+    output.append(p, { command })
+  end
   local lines, pending = {}, { stdout = "", stderr = "" }
   local function receive(_, data, stream)
     data[1] = pending[stream] .. data[1]
     pending[stream] = table.remove(data)
     vim.list_extend(lines, data)
-    output.append(p, data)
+    if capture then
+      output.append(p, data)
+    end
   end
-  output.append(p, { "$ " .. table.concat(vim.tbl_map(vim.fn.shellescape, args), " ") })
   local resume = p.task.resume
   local id = vim.fn.jobstart(args, {
     cwd = p.root,
@@ -67,7 +81,9 @@ function M.exec(p, args, title, diagnostic_dir, env)
         for _, rest in pairs(pending) do
           if rest ~= "" then
             table.insert(lines, rest)
-            output.append(p, { rest })
+            if capture then
+              output.append(p, { rest })
+            end
           end
         end
         resume(code)
@@ -85,7 +101,11 @@ function M.exec(p, args, title, diagnostic_dir, env)
     output.diagnostics(p, lines, diagnostic_dir or p.root, title, code ~= 0)
   end
   if code ~= 0 then
-    output.show(p)
+    output.begin(p, true)
+    if not capture then
+      output.append(p, { command })
+      output.append(p, lines)
+    end
     error(("%s failed (exit %d). See CMake output or :copen."):format(title, code), 0)
   end
   return lines

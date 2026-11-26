@@ -3,10 +3,18 @@ local api = vim.api
 local project = require("neocmake.project")
 
 function M.append(p, lines)
+  if #lines == 0 then
+    return
+  end
+  local first = #p.log == 0
   vim.list_extend(p.log, lines)
+  local preview = p.task.preview
+  if preview and api.nvim_buf_is_loaded(preview.buf) then
+    api.nvim_chan_send(preview.channel, table.concat(lines, "\n") .. "\n")
+  end
   if p.logbuf and api.nvim_buf_is_valid(p.logbuf) then
     vim.bo[p.logbuf].modifiable = true
-    api.nvim_buf_set_lines(p.logbuf, -1, -1, false, lines)
+    api.nvim_buf_set_lines(p.logbuf, first and 0 or -1, -1, false, lines)
     vim.bo[p.logbuf].modifiable = false
   end
 end
@@ -17,6 +25,56 @@ function M.clear(p)
     vim.bo[p.logbuf].modifiable = true
     api.nvim_buf_set_lines(p.logbuf, 0, -1, false, {})
     vim.bo[p.logbuf].modifiable = false
+  end
+end
+
+-- A virtual terminal mirrors the captured output while the original job
+-- supplies the lines for quickfix. Closing its channel gives this split the
+-- same press-any-key dismissal as a finished program in :terminal.
+function M.begin(p, show)
+  if not p.task.logging then
+    M.clear(p)
+    p.task.logging = true
+  end
+  if not show or p.task.preview then
+    return
+  end
+  local buf = api.nvim_create_buf(false, true)
+  local old = p.preview_buf and vim.fn.bufwinid(p.preview_buf) or -1
+  if old ~= -1 then
+    api.nvim_set_current_win(old)
+    api.nvim_win_set_buf(old, buf)
+  else
+    api.nvim_open_win(buf, true, { split = "below", win = -1, height = 12 })
+  end
+  local channel = api.nvim_open_term(buf, {
+    on_input = vim.schedule_wrap(function()
+      -- The CMake job owns separate pipes and continues when this view closes.
+      if api.nvim_buf_is_loaded(buf) then
+        api.nvim_buf_delete(buf, { force = true })
+      end
+    end),
+  })
+  vim.bo[buf].bufhidden = "wipe"
+  vim.b[buf].neocmake_root = p.root
+  vim.b[buf].term_title = "CMake " .. p.task.action
+  p.preview_buf = buf
+  p.task.preview = { buf = buf, channel = channel }
+  if #p.log > 0 then
+    api.nvim_chan_send(channel, table.concat(p.log, "\n") .. "\n")
+  end
+  vim.cmd.startinsert()
+end
+
+function M.finish(p, message)
+  local preview = p.task.preview
+  if not preview then
+    return
+  end
+  M.append(p, { message })
+  if api.nvim_buf_is_loaded(preview.buf) then
+    api.nvim_chan_send(preview.channel, "Press any key to close.")
+    vim.fn.chanclose(preview.channel)
   end
 end
 
