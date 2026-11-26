@@ -53,7 +53,7 @@ function M.metadata(root)
     end
   end
   for _, name in ipairs({ "CMakePresets.json", "CMakeUserPresets.json" }) do
-    local file = vim.fs.joinpath(root, name)
+    local file = project.path(root, name)
     if vim.uv.fs_stat(file) then
       read(file)
     end

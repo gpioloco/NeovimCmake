@@ -4,7 +4,7 @@ local projects = {}
 
 function M.path(base, path)
   return fs.normalize(
-    vim.fn.isabsolutepath(path) == 1 and path or fs.joinpath(base, path),
+    vim.fn.isabsolutepath(path) == 1 and path or (base .. "/" .. path),
     { expand_env = false }
   )
 end
@@ -59,7 +59,7 @@ function M.current()
   assert(root, "Open a file inside a CMake project")
   root = fs.normalize(uv.fs_realpath(root) or root)
   if not projects[root] then
-    local state = fs.joinpath(vim.fn.stdpath("state"), "neocmake", vim.fn.sha256(root) .. ".json")
+    local state = M.path(vim.fn.stdpath("state"), "neocmake/" .. vim.fn.sha256(root) .. ".json")
     local ok, saved = pcall(M.json, state)
     projects[root] = {
       root = root,

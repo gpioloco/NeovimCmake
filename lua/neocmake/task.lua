@@ -62,13 +62,20 @@ function M.exec(p, args, title, diagnostic_dir, env)
     output.append(p, { command })
   end
   local lines, pending = {}, { stdout = "", stderr = "" }
-  local function receive(_, data, stream)
-    data[1] = pending[stream] .. data[1]
-    pending[stream] = table.remove(data)
+  local function record(data)
+    -- jobstart splits at LF. Strip CR only after reassembling a complete line.
+    for i, line in ipairs(data) do
+      data[i] = line:gsub("\r$", "")
+    end
     vim.list_extend(lines, data)
     if capture then
       output.append(p, data)
     end
+  end
+  local function receive(_, data, stream)
+    data[1] = pending[stream] .. data[1]
+    pending[stream] = table.remove(data)
+    record(data)
   end
   local resume = p.task.resume
   local id = vim.fn.jobstart(args, {
@@ -80,10 +87,7 @@ function M.exec(p, args, title, diagnostic_dir, env)
       vim.schedule(function()
         for _, rest in pairs(pending) do
           if rest ~= "" then
-            table.insert(lines, rest)
-            if capture then
-              output.append(p, { rest })
-            end
+            record({ rest })
           end
         end
         resume(code)

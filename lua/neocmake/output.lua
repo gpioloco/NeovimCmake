@@ -81,7 +81,7 @@ end
 function M.show(p)
   if not p.logbuf or not api.nvim_buf_is_valid(p.logbuf) then
     p.logbuf = api.nvim_create_buf(false, true)
-    api.nvim_buf_set_name(p.logbuf, "CMake output — " .. p.root)
+    api.nvim_buf_set_name(p.logbuf, "neocmake://output/" .. p.root)
     vim.b[p.logbuf].neocmake_root = p.root
     api.nvim_buf_set_lines(p.logbuf, 0, -1, false, p.log)
     vim.bo[p.logbuf].modifiable = false
@@ -118,7 +118,7 @@ function M.diagnostics(p, lines, cwd, title, failed)
   end
 
   for i, raw in ipairs(lines) do
-    local line = raw:gsub("\27%[[%d;]*[A-Za-z]", "")
+    local line = raw:gsub("\27%[[%d;]*[A-Za-z]", ""):gsub("^%s*%d+>%s*", "")
     local enter = line:match("Entering directory [`'](.-)'")
     if enter then
       table.insert(dirs, enter)
@@ -131,7 +131,14 @@ function M.diagnostics(p, lines, cwd, title, failed)
       file, row, kind, msg = line:match("^(.-):(%d+):%s*([%a ]+):%s*(.*)")
     end
     if not file then
-      file, row, col, kind, msg = line:match("^%s*(.-)%((%d+),?(%d*)%):%s*([%a ]+) [%a]+%d+%s*:%s*(.*)")
+      local detail
+      file, row, col, detail = line:match("^%s*(.-)%((%d+),?%s*(%d*)%)%s*:%s*(.*)")
+      if detail then
+        kind, msg = detail:match("^([%a ]-)%s+(%u+%d+%s*:.*)")
+        if not kind then
+          kind, msg = detail:match("^([%a ]+):%s*(.*)")
+        end
+      end
     end
     if file then
       add(file, row, col, kind, msg)

@@ -2,13 +2,6 @@ local project = require("neocmake.project")
 local uv = vim.uv
 local M = {}
 
-local function contents(file)
-  local f = assert(io.open(file, "rb"))
-  local data = f:read("*a")
-  f:close()
-  return assert(data)
-end
-
 -- Ninja Multi-Config emits several commands for each file. clangd takes a
 -- single command, so publish the entries for the selected configuration.
 local function selected_commands(data, config)
@@ -102,7 +95,7 @@ function M.publish(p, config)
   local dst = p.root .. "/compile_commands.json"
   local stat, dest = uv.fs_stat(src), uv.fs_lstat(dst)
   if not stat then
-    if dest and dest.type == "file" and p.saved.database_hash == vim.fn.sha256(contents(dst)) then
+    if dest and dest.type == "file" and p.saved.database_hash == vim.fn.sha256(vim.fn.readblob(dst)) then
       assert(uv.fs_unlink(dst))
       p.saved.database_hash = nil
     end
@@ -125,11 +118,11 @@ function M.publish(p, config)
     return p.database_warning
   end
 
-  local raw = contents(src)
+  local raw = vim.fn.readblob(src)
   local data = p.model.generator.multiConfig and selected_commands(raw, config) or raw
   local hash = vim.fn.sha256(data)
   local same_file = uv.fs_realpath(src) == uv.fs_realpath(dst)
-  local previous = dest and dest.type == "file" and vim.fn.sha256(contents(dst))
+  local previous = dest and dest.type == "file" and vim.fn.sha256(vim.fn.readblob(dst))
   local dir, warning = p.root, nil
   if previous ~= hash and not (same_file and raw == data) then
     if not dest or (not same_file and previous and previous == p.saved.database_hash) then
@@ -138,7 +131,7 @@ function M.publish(p, config)
     else
       dir = p.saved.dir
       if raw ~= data then
-        dir = vim.fs.joinpath(dir, ".cmake", "neocmake", vim.fn.sha256(config))
+        dir = project.path(dir, ".cmake/neocmake/" .. vim.fn.sha256(config))
         vim.fn.mkdir(dir, "p")
         write_atomic(dir .. "/compile_commands.json", data)
       end

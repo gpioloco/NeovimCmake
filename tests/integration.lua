@@ -1,11 +1,14 @@
 -- Run from the repository root with nvim --headless -u NONE -c 'luafile tests/integration.lua'
 -- Omit -u NONE and set NEOCMAKE_LOCAL_LSP=1 to test the configured clangd client.
 local repo = vim.fn.getcwd()
-local tmp = vim.fn.tempname() .. " cmake integration"
+local tmp = vim.fs.normalize(vim.fn.tempname() .. " cmake integration")
+local windows = vim.fn.has("win32") == 1
+local exe = windows and ".exe" or ""
 local root = tmp .. "/workflow"
 local api = vim.api
 vim.opt.rtp:prepend(repo)
 vim.fn.mkdir(root, "p")
+root = vim.fs.normalize(assert(vim.uv.fs_realpath(root)))
 for _, file in ipairs({ "CMakeLists.txt", "CMakePresets.json", "src", "include" }) do
   local original = repo .. "/examples/workflow/" .. file
   local operation = vim.fn.isdirectory(original) == 1 and "copy_directory" or "copy"
@@ -105,7 +108,7 @@ local function run()
   action("CMakeBuildConfiguration")
   assert_preview("CMAKE_BUILD_TYPE:STRING=Release")
   assert(p.model.configurations[1].name == "Release" and p.saved.dir == root .. "/out/debug")
-  assert(project.json(root .. "/compile_commands.json")[1].command:find("-DNDEBUG", 1, true))
+  assert(project.json(root .. "/compile_commands.json")[1].command:match("[/-]D%s*NDEBUG"))
   action("CMakeConfigure")
   assert(p.model.configurations[1].name == "Release")
   assert_preview("CMAKE_BUILD_TYPE:STRING=Release")
@@ -138,7 +141,7 @@ local function run()
   action("CMakeBuildInstall")
   assert_preview("Installing:")
   for _, app in ipairs({ "hello_base", "hello_extended" }) do
-    local result = vim.system({ root .. "/stage/debug/bin/" .. app }):wait()
+    local result = vim.system({ root .. "/stage/debug/bin/" .. app .. exe }):wait()
     assert(result.code == 0 and result.stdout:match(app == "hello_base" and "21" or "42"))
   end
 
@@ -172,7 +175,9 @@ local function run()
   vim.cmd.stopinsert()
   vim.cmd.close()
   api.nvim_set_current_buf(base)
-  assert(project.json(root .. "/compile_commands.json")[1].directory == root .. "/out/release")
+  assert(
+    vim.fs.normalize(project.json(root .. "/compile_commands.json")[1].directory) == root .. "/out/release"
+  )
 
   if vim.env.NEOCMAKE_LOCAL_LSP then
     wait_for(function()
@@ -223,24 +228,46 @@ local function run()
   local multi_db = project.json(root .. "/compile_commands.json")
   assert(#multi_db == 4 and multi_db[1].command:find("Release", 1, true), vim.inspect(multi_db))
   action("CMakeInstall " .. tmp .. "/custom prefix")
-  assert(vim.fn.executable(tmp .. "/custom prefix/bin/hello_extended") == 1)
-  assert(vim.fn.filereadable(root .. "/out/multi/Release/hello_extended") == 1)
+  assert(vim.fn.executable(tmp .. "/custom prefix/bin/hello_extended" .. exe) == 1)
+  assert(vim.fn.filereadable(root .. "/out/multi/Release/hello_extended" .. exe) == 1)
   answers = { "Debug" }
   action("CMakeBuildConfiguration")
   assert(p.saved.build_preset == "multi-release")
   assert(project.json(root .. "/compile_commands.json")[1].command:find("Debug", 1, true))
   action("CMakeBuild")
-  assert(vim.fn.executable(root .. "/out/multi/Debug/hello_extended") == 1)
+  assert(vim.fn.executable(root .. "/out/multi/Debug/hello_extended" .. exe) == 1)
 
   -- Removing the presets falls back to a conventional build tree. Keep a
   -- pre-existing root database intact and point clangd to the new build.
   vim.fn.delete(root .. "/CMakeUserPresets.json")
   vim.fn.delete(root .. "/CMakePresets.json")
   vim.fn.writefile({ "[]" }, root .. "/compile_commands.json")
+  if windows then
+    vim.env.CMAKE_GENERATOR = "Ninja"
+  end
   action("CMakeConfigure")
   action("CMakeBuild")
   assert(p.database_dir == root .. "/build", vim.inspect(p.database_dir))
   assert(vim.deep_equal(vim.fn.readfile(root .. "/compile_commands.json"), { "[]" }))
+  -- Replay MSBuild's node prefixes and CRLF through the job and quickfix paths.
+  local messages = tmp .. "/msbuild.txt"
+  vim.fn.writefile({
+    "  2>" .. source .. "(4,12) : error C2065: undeclared identifier\r",
+    "  2>" .. source .. "(2): warning: unused declaration\r",
+  }, messages, "b")
+  local task = require("neocmake.task")
+  task.start(p, "MSBuild output", function()
+    task.exec(p, { "cmake", "-E", "cat", messages }, "compile", p.saved.dir)
+  end)
+  wait_for(function()
+    return not p.task
+  end, "Timed out reading MSBuild output")
+  assert(not p.error, p.error)
+  local entries = vim.fn.getqflist({ id = p.qfid, items = 1 }).items
+  assert(#entries == 2 and entries[1].bufnr == base and entries[1].lnum == 4 and entries[1].col == 12)
+  assert(entries[1].type == "E" and entries[1].text == "C2065: undeclared identifier")
+  assert(entries[2].bufnr == base and entries[2].type == "W" and entries[2].col == 1)
+  assert(not table.concat(p.log):find("\r", 1, true))
   print(
     "PASS preset dropdown, compatible presets, four targets, launch, install, build diagnostics, database switch"
   )
