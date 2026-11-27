@@ -39,25 +39,8 @@ local function find_root(start)
   return top
 end
 
-function M.for_buffer(buf)
-  for dir in fs.parents(vim.api.nvim_buf_get_name(buf)) do
-    if projects[dir] then
-      return projects[dir]
-    end
-  end
-end
-
-function M.current()
-  local root = vim.b.neocmake_root
-  if not root and vim.bo.buftype == "" then
-    local name = vim.api.nvim_buf_get_name(0)
-    if name ~= "" then
-      root = find_root(fs.dirname(name))
-    end
-  end
-  root = root or find_root(vim.fn.getcwd())
-  assert(root, "Open a file inside a CMake project")
-  root = fs.normalize(uv.fs_realpath(root) or root)
+local function from_root(root)
+  root = fs.normalize(uv.fs_realpath(root) or root, { expand_env = false })
   if not projects[root] then
     local state = M.path(vim.fn.stdpath("state"), "neocmake/" .. vim.fn.sha256(root) .. ".json")
     local ok, saved = pcall(M.json, state)
@@ -70,6 +53,22 @@ function M.current()
     }
   end
   return projects[root]
+end
+
+function M.for_buffer(buf)
+  local root = vim.b[buf].neocmake_root
+  if not root and vim.bo[buf].buftype == "" then
+    local name = vim.api.nvim_buf_get_name(buf)
+    if name ~= "" then
+      root = find_root(fs.dirname(fs.normalize(name, { expand_env = false })))
+    end
+  end
+  return root and from_root(root)
+end
+
+function M.current()
+  return M.for_buffer(0)
+    or from_root(assert(find_root(vim.fn.getcwd()), "Open a file inside a CMake project"))
 end
 
 function M.save(p)
@@ -108,7 +107,7 @@ function M.build_types(dir, current)
   end, names)
 end
 
-function M.model(dir, previous)
+function M.codemodel(dir, previous)
   local reply = dir .. "/.cmake/api/v1/reply/"
   local indices = {}
   for name in fs.dir(reply) do
@@ -126,6 +125,16 @@ function M.model(dir, previous)
   local response = index.reply["client-neocmake"]
   assert(response and response["codemodel-v2"], "CMake codemodel missing. Configure again.")
   local model = M.json(reply .. response["codemodel-v2"].jsonFile)
+  model.index, model.generator = path, index.cmake.generator
+  return model
+end
+
+function M.model(dir, previous)
+  local model = M.codemodel(dir, previous)
+  if model == previous then
+    return previous
+  end
+  local reply = fs.dirname(model.index) .. "/"
   local configs = {}
   for _, cfg in ipairs(model.configurations) do
     local targets = {}
@@ -146,7 +155,7 @@ function M.model(dir, previous)
     end
     table.insert(configs, { name = cfg.name, targets = targets })
   end
-  return { configurations = configs, generator = index.cmake.generator, index = path }
+  return { configurations = configs, generator = model.generator, index = model.index }
 end
 
 return M

@@ -20,6 +20,8 @@ local fixture = root .. "/CMakePresets.json"
 local preset_file = require("neocmake.project").json(fixture)
 preset_file.configurePresets[1].environment = { NEOCMAKE_PARENT = "${presetName}" }
 preset_file.configurePresets[3].environment = { NEOCMAKE_RUN = "$env{NEOCMAKE_PARENT}-run" }
+local release_tree = "build/" .. preset_file.configurePresets[3].name
+preset_file.configurePresets[3].binaryDir = "${sourceDir}/" .. release_tree
 preset_file.configurePresets[3].cacheVariables.CMAKE_CXX_FLAGS = "-DNEOCMAKE_RELEASE_PROBE=73"
 vim.fn.writefile({ vim.json.encode(preset_file) }, fixture)
 local app_file = root .. "/src/hello_base.cpp"
@@ -50,7 +52,8 @@ end
 
 local p
 local function action(name, expected_error)
-  vim.cmd(name)
+  local ok, err = pcall(vim.cmd, name)
+  assert(ok or expected_error, err)
   wait_for(function()
     return not p.task
   end, "Timed out in " .. name)
@@ -68,6 +71,37 @@ local function run()
   local project = require("neocmake.project")
   p = project.current()
   assert(p.root == root)
+  local manual = tmp .. "/external database"
+  vim.fn.mkdir(manual, "p")
+  vim.fn.writefile({ "[]" }, manual .. "/compile_commands.json")
+  plugin.setup({ prefix = "<F8>" })
+  assert(vim.fn.maparg("<F8>d", "n"):find("CMakeConfigureDatabase", 1, true))
+  local input = vim.ui.input
+  vim.ui.input = function(options, callback)
+    assert(options.completion == "file")
+    callback(manual .. "/compile_commands.json")
+  end
+  api.nvim_feedkeys(api.nvim_replace_termcodes("<F8>d", true, false, true), "xt", false)
+  wait_for(function()
+    return api.nvim_win_get_config(0).relative == "editor"
+  end, "Database shortcut did not open its picker")
+  api.nvim_feedkeys(api.nvim_replace_termcodes("G<CR>", true, false, true), "xt", false)
+  wait_for(function()
+    return not p.task
+  end, "Database selection did not finish")
+  assert(p.saved.database_override == manual and p.database_dir == manual and not p.saved.dir)
+  plugin.setup({ prefix = "<F8>", select = picker })
+  vim.ui.input = function(_, callback)
+    callback(nil)
+  end
+  answers = { "browse" }
+  action("CMakeConfigureDatabase")
+  vim.ui.input = input
+  action("CMakeConfigureDatabase missing/subdir", true)
+  assert(p.saved.database_override == manual and p.database_dir == manual)
+  answers = { "auto" }
+  action("CMakeConfigureDatabase")
+  assert(not p.saved.database_override and not p.database_dir)
   if windows and vim.env.NEOCMAKE_TEST_VISUAL_STUDIO then
     plugin.setup({
       select = function(items, _, callback)
@@ -98,8 +132,12 @@ local function run()
   plugin.setup({ prefix = "<F7>", select = picker })
   assert(vim.fn.maparg("<F8>b", "n") == "" and vim.fn.maparg("<F7>b", "n") ~= "")
   assert(p.saved.dir == root .. "/out/debug", vim.inspect(p.saved))
-  assert(vim.fn.filereadable(root .. "/compile_commands.json") == 1)
-  local db = project.json(root .. "/compile_commands.json")
+  assert(not vim.uv.fs_lstat(root .. "/compile_commands.json"))
+  local function active_database()
+    return project.json(p.database_dir .. "/compile_commands.json")
+  end
+  assert(p.database_dir == p.saved.dir)
+  local db = active_database()
   assert(#db == 4 and db[1].command:match("GREETING_BASE_VALUE=21"))
 
   local function assert_preview(text)
@@ -122,7 +160,7 @@ local function run()
   action("CMakeBuildConfiguration")
   assert_preview("CMAKE_BUILD_TYPE:STRING=Release")
   assert(p.model.configurations[1].name == "Release" and p.saved.dir == root .. "/out/debug")
-  assert(project.json(root .. "/compile_commands.json")[1].command:match("[/-]D%s*NDEBUG"))
+  assert(active_database()[1].command:match("[/-]D%s*NDEBUG"))
   action("CMakeConfigure")
   assert(p.model.configurations[1].name == "Release")
   assert_preview("CMAKE_BUILD_TYPE:STRING=Release")
@@ -189,18 +227,56 @@ local function run()
   vim.cmd.stopinsert()
   vim.cmd.close()
   api.nvim_set_current_buf(base)
-  assert(
-    vim.fs.normalize(project.json(root .. "/compile_commands.json")[1].directory) == root .. "/out/release"
-  )
+  assert(p.database_dir == root .. "/" .. release_tree)
+  assert(vim.fs.normalize(active_database()[1].directory) == p.database_dir)
+  assert(not vim.uv.fs_lstat(root .. "/compile_commands.json"))
+
+  local function check_restart(dir)
+    if vim.fn.executable("clangd") ~= 1 then
+      return
+    end
+    local navigation = vim
+      .system({
+        vim.v.progpath,
+        "--headless",
+        "-u",
+        "NONE",
+        "-i",
+        "NONE",
+        "-l",
+        repo .. "/tests/definition.lua",
+        repo,
+        root,
+        dir,
+      })
+      :wait(30000)
+    assert(navigation.code == 0, navigation.stderr)
+  end
+  check_restart(p.saved.dir)
+  local debug_dir = root .. "/out/debug"
+  answers = { debug_dir }
+  action("CMakeConfigureDatabase")
+  assert(p.saved.database_override == "out/debug" and p.database_dir == debug_dir)
+  action("CMakeBuild")
+  assert(p.database_dir == debug_dir and p.saved.preset == "release")
+  check_restart(debug_dir)
+  answers = { "auto" }
+  action("CMakeConfigureDatabase")
+  assert(p.database_dir == p.saved.dir and not p.saved.database_override)
 
   if vim.env.NEOCMAKE_LOCAL_LSP then
+    local client
     wait_for(function()
-      return #vim.lsp.get_clients({ bufnr = base, name = "clangd" }) > 0
-    end, "Local config did not attach clangd")
-    local client = vim.lsp.get_clients({ bufnr = base, name = "clangd" })[1]
-    wait_for(function()
-      return client.initialized
-    end, "clangd did not initialize")
+      for _, candidate in ipairs(vim.lsp.get_clients({ bufnr = base, name = "clangd" })) do
+        if
+          candidate.initialized
+          and (candidate.config.init_options or {}).compilationDatabasePath == p.database_dir
+        then
+          client = candidate
+          return true
+        end
+      end
+    end, "Local clangd did not switch back to the active build")
     -- Trigger a fresh parse and query a symbol supplied exclusively by CMake.
     api.nvim_buf_set_lines(base, -1, -1, false, { "int probe = NEOCMAKE_RELEASE_PROBE;" })
     local params = {
@@ -213,7 +289,8 @@ local function run()
       "clangd did not see -DNEOCMAKE_RELEASE_PROBE=73: " .. vim.inspect(info)
     )
     api.nvim_buf_set_lines(base, -2, -1, false, {})
-    print("Local clangd picked up Release compiler flags in the open buffer")
+    assert(loadfile(repo .. "/tests/definition.lua"))(root, p.database_dir)
+    print("Local clangd picked up Release compiler flags and navigated to src/base.cpp")
   end
   -- Exercise an included, inherited user build preset and Ninja Multi-Config.
   vim.fn.writefile({
@@ -239,15 +316,25 @@ local function run()
   answers = { "multi", "multi-release" }
   action("CMakePreset")
   action("CMakeBuildPreset")
-  local multi_db = project.json(root .. "/compile_commands.json")
+  local multi_db = active_database()
   assert(#multi_db == 4 and multi_db[1].command:find("Release", 1, true), vim.inspect(multi_db))
+  assert(vim.fs.relpath(p.saved.dir, p.database_dir) and p.database_dir ~= p.saved.dir)
+  local cmake_db = vim.fn.readblob(p.saved.dir .. "/compile_commands.json")
+  assert(#vim.json.decode(cmake_db) > #multi_db)
+  action("CMakeConfigureDatabase out/debug/compile_commands.json")
+  assert(p.saved.database_override == "out/debug" and p.database_dir == debug_dir)
+  answers = { "auto" }
+  action("CMakeConfigureDatabase")
+  assert(vim.deep_equal(active_database(), multi_db))
   action("CMakeInstall " .. tmp .. "/custom prefix")
   assert(vim.fn.executable(tmp .. "/custom prefix/bin/hello_extended" .. exe) == 1)
   assert(vim.fn.filereadable(root .. "/out/multi/Release/hello_extended" .. exe) == 1)
   answers = { "Debug" }
   action("CMakeBuildConfiguration")
   assert(p.saved.build_preset == "multi-release")
-  assert(project.json(root .. "/compile_commands.json")[1].command:find("Debug", 1, true))
+  assert(active_database()[1].command:find("Debug", 1, true))
+  assert(vim.fn.readblob(p.saved.dir .. "/compile_commands.json") == cmake_db)
+  assert(not vim.uv.fs_lstat(root .. "/compile_commands.json"))
   action("CMakeBuild")
   assert(vim.fn.executable(root .. "/out/multi/Debug/hello_extended" .. exe) == 1)
 

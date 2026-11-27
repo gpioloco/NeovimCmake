@@ -54,6 +54,19 @@ function M.choose(p, options, items, prompt, current)
   return item
 end
 
+function M.input_path(p)
+  vim.ui.input({
+    prompt = "Compilation database file or directory: ",
+    default = p.root:gsub("/$", "") .. "/",
+    completion = "file",
+  }, vim.schedule_wrap(p.task.resume))
+  local path = coroutine.yield()
+  if not path or path == "" then
+    error(cancelled)
+  end
+  return path
+end
+
 -- Environment discovery can return secrets. Keep these results out of the log
 -- and quickfix list, including when the child exits unsuccessfully.
 function M.probe(p, args, options)

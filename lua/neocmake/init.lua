@@ -36,8 +36,8 @@ local function select_preset(p)
   end
 end
 
-local function configuration(p)
-  local configs = p.model.configurations
+local function configuration(p, model)
+  local configs = (model or p.model).configurations
   if #configs == 1 then
     return configs[1]
   end
@@ -57,11 +57,43 @@ local function configuration(p)
   error("No CMake configuration named " .. name .. ". Select a configuration or another build preset.")
 end
 
+local function update_database(p, model, override)
+  local generator = model and model.generator
+  local preset_env = generator and p.presets and p.presets.environment(p.saved.preset, generator.name)
+  p.env = vs.merge(p.vs_env, preset_env)
+  local cfg = model and configuration(p, model)
+  local warning = database.update(p, override, generator and generator.multiConfig and cfg.name or nil)
+  if warning and warning ~= p.database_warning then
+    vim.notify(warning, vim.log.levels.WARN)
+  end
+  p.database_warning = warning
+  return cfg
+end
+
+local function load_database(p, override)
+  local developer_env = vs.environment(p)
+  local model = p.model
+  if not model and p.saved.dir then
+    -- A user-selected database can outlive the last configured CMake tree.
+    local ok, cached = pcall(project.codemodel, p.saved.dir)
+    if ok then
+      model = cached
+      p.presets = p.saved.preset and project.has_presets(p.root) and presets.metadata(p.root, developer_env)
+        or nil
+    end
+  end
+  update_database(p, model, override)
+end
+
+local function restore_database(p)
+  task.start(p, "restore clangd build settings", function()
+    load_database(p, p.saved.database_override)
+  end)
+end
+
 local function refresh(p)
   p.model = project.model(p.saved.dir, p.model)
-  local preset_env = p.presets and p.presets.environment(p.saved.preset, p.model.generator.name)
-  p.env = vs.merge(p.vs_env, preset_env)
-  local cfg = configuration(p)
+  local cfg = update_database(p, p.model, p.saved.database_override)
   if p.saved.target and not cfg.targets[p.saved.target] then
     p.saved.target = nil
   end
@@ -69,11 +101,6 @@ local function refresh(p)
   if not launch or not launch.path then
     p.saved.launch = nil
   end
-  local warning = database.publish(p, cfg.name)
-  if warning and warning ~= p.database_warning then
-    vim.notify(warning, vim.log.levels.WARN)
-  end
-  p.database_warning = warning
   project.save(p)
   return cfg
 end
@@ -158,6 +185,13 @@ end
 
 function actions.ConfigureEnvironment(p)
   vs.select(p, opts)
+end
+
+function actions.ConfigureDatabase(p, args)
+  local override = database.choose(p, opts, args.args)
+  load_database(p, override)
+  p.saved.database_override = override
+  project.save(p)
 end
 
 function actions.BuildPreset(p)
@@ -297,6 +331,7 @@ end
 
 -- Keep the old Ex names as aliases for existing mappings and scripts.
 local keys = {
+  { "d", "ConfigureDatabase", "Configure · Select clangd compilation database" },
   { "v", "ConfigureEnvironment", "Configure · Select Visual Studio environment" },
   { "p", "ConfigurePreset", "Configure · Select preset", "Preset" },
   { "P", "BuildPreset", "Build · Select preset" },
@@ -318,7 +353,7 @@ function M.status()
   return vim.tbl_extend(
     "force",
     vim.deepcopy(p.saved),
-    { root = p.root, busy = p.task ~= nil, error = p.error }
+    { root = p.root, busy = p.task ~= nil, error = p.error, database_dir = p.database_dir }
   )
 end
 
@@ -349,6 +384,11 @@ local function invoke(name, args)
         "Build target: " .. (s.target or "default"),
         "Launch target: " .. (s.launch or "unselected"),
         "Build tree: " .. (s.dir or "unconfigured"),
+        "Clangd database: "
+          .. (p.database_dir and vim.fs.joinpath(p.database_dir, "compile_commands.json") or "not loaded")
+          .. (
+            s.database_override and (" (custom: " .. s.database_override .. ")") or " (follow active build)"
+          ),
         "Configuration: "
           .. (p.model and configuration(p).name or s.configuration or s.build_type or "default"),
         "Activity: " .. (p.task and p.task.action or "idle"),
@@ -381,15 +421,15 @@ function M.setup(options)
   installed = {}
   for _, spec in ipairs(keys) do
     local suffix, name, description, alias = unpack(spec)
-    local nargs = name == "Run" and "*" or (name == "BuildInstall" and "?" or 0)
+    local completion = ({ BuildInstall = "dir", ConfigureDatabase = "file" })[name]
+    local nargs = name == "Run" and "*" or (completion and "?" or 0)
     local function callback(args)
       local ok, err = pcall(invoke, name, args)
       if not ok then
         vim.notify(tostring(err), vim.log.levels.ERROR)
       end
     end
-    local options =
-      { nargs = nargs, complete = name == "BuildInstall" and "dir" or nil, desc = description, force = true }
+    local options = { nargs = nargs, complete = completion, desc = description, force = true }
     vim.api.nvim_create_user_command("CMake" .. name, callback, options)
     if alias then
       vim.api.nvim_create_user_command("CMake" .. alias, callback, options)
@@ -402,8 +442,18 @@ function M.setup(options)
   end
   vim.api.nvim_create_autocmd("LspAttach", {
     group = vim.api.nvim_create_augroup("NeoCMakeClangd", { clear = true }),
-    callback = database.on_attach,
+    callback = function(event)
+      local client = vim.lsp.get_client_by_id(event.data.client_id)
+      if client and client.name == "clangd" then
+        database.on_attach(event.buf, client, restore_database)
+      end
+    end,
   })
+  for _, client in ipairs(vim.lsp.get_clients({ name = "clangd" })) do
+    for buf in pairs(client.attached_buffers) do
+      database.on_attach(buf, client, restore_database)
+    end
+  end
   M.configured = true
 end
 

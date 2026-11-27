@@ -78,6 +78,7 @@ All mappings share the configurable prefix `<leader>m`. The **Key** column gives
 | --- | --- | --- |
 | `v` | `:CMakeConfigureEnvironment` | Choose a Visual Studio installation and target architecture on Windows |
 | `p` | `:CMakeConfigurePreset` | Choose and apply a configure preset |
+| `d` | `:CMakeConfigureDatabase [path]` | Choose the compilation database clangd uses for this project |
 | `c` | `:CMakeConfigure` | Reconfigure the project and refresh its targets |
 | `P` | `:CMakeBuildPreset` | Choose a build preset compatible with the configure preset |
 | `k` | `:CMakeBuildConfiguration` | Choose a build configuration such as Debug or Release |
@@ -96,7 +97,11 @@ All mappings share the configurable prefix `<leader>m`. The **Key** column gives
 
 ## clangd and build diagnostics
 
-NeoCMake enables `CMAKE_EXPORT_COMPILE_COMMANDS` when configuring and publishes the active `compile_commands.json` at the project root. Switching configurations updates open clangd buffers. If you already maintain a root database or symlink, NeoCMake preserves it and points clangd at the selected build database.
+By default clangd follows the active CMake build. Select a Debug or Release preset with `<leader>mp` and NeoCMake points clangd at that preset's build directory. For Ninja Multi-Config, NeoCMake writes a filtered database for the active configuration under the build tree's `.cmake/neocmake/` directory. [clangd compilation database options](https://clangd.llvm.org/extensions#compilation-commands)
+
+Press **`<leader>md`** to choose a specific database. Pick a previously used directory or **Enter file or directory…** and enter the folder or its `compile_commands.json`. You can also pass a project-relative path directly, for example `:CMakeConfigureDatabase build/debug`. Custom absolute paths work for builds outside the project. The selection applies to open clangd buffers, survives restarting Neovim, and stays selected when you change build presets. Choose **Follow active CMake build** in the same picker to resume automatic switching.
+
+To check go-to-definition, run `:CMakeStatus` and confirm **Clangd database** points to the expected build. Open a C++ source file, place the cursor on a project function call, and use `gd` in LazyVim or `:lua vim.lsp.buf.definition()` in standard Neovim. If the jump fails, `:checkhealth vim.lsp` shows whether clangd is attached to that buffer.
 
 After a failed build, use `:copen` to see the compiler messages and `:cnext` to jump to a source location. A successful rebuild clears stale build diagnostics. Linker errors and other messages without a source location remain available in the build log.
 
@@ -122,7 +127,7 @@ From the repository root, the integration test drives the pickers, builds and ru
 nvim --headless -u NONE -i NONE -c "luafile tests/integration.lua"
 ```
 
-To include your configured clangd in the test, omit `-u NONE` and set `NEOCMAKE_LOCAL_LSP=1` in the environment.
+With clangd installed, the test opens the project in a fresh Neovim process and jumps from a call to its definition in a different source file using the saved build directory. To also test with your configured clangd immediately after a build, omit `-u NONE` and set `NEOCMAKE_LOCAL_LSP=1` in the environment.
 
 On Windows, set `$env:NEOCMAKE_TEST_VISUAL_STUDIO = "1"` in a regular PowerShell terminal before running the integration test to exercise the first discovered x64 installation. To test switching between two fixture installations and restoring the choice across two Neovim processes, run `nvim --headless -u NONE -i NONE -l tests/visual_studio.lua`.
 
