@@ -1,4 +1,5 @@
 local project = require("neocmake.project")
+local vs = require("neocmake.visual_studio")
 local uv = vim.uv
 local M = {}
 
@@ -31,6 +32,15 @@ local function reload_clangd(p, stale_client)
       if vim.fs.relpath(p.root, path) then
         if not replacement then
           local config = vim.deepcopy(client.config)
+          local previous = config._neocmake_visual_studio
+          if previous then
+            config.cmd_env = previous.original
+            config._neocmake_visual_studio = nil
+          end
+          if p.clangd_env then
+            config._neocmake_visual_studio = { original = config.cmd_env, active = p.clangd_env }
+            config.cmd_env = vs.merge(p.clangd_env, config.cmd_env)
+          end
           config.root_dir = p.root
           config.workspace_folders = { { name = p.root, uri = vim.uri_from_fname(p.root) } }
           config.init_options = config.init_options or vim.empty_dict()
@@ -65,7 +75,15 @@ function M.on_attach(event)
   end
   local p = project.for_buffer(event.buf)
   local configured = (client.config.init_options or {}).compilationDatabasePath
-  if p and p.database_dir and (configured or p.database_dir ~= p.root) and configured ~= p.database_dir then
+  if not p or not p.model then
+    return
+  end
+  local environment = client.config._neocmake_visual_studio
+  local env_changed = not vim.deep_equal(environment and environment.active, p.clangd_env)
+  if
+    env_changed
+    or (p.database_dir and (configured or p.database_dir ~= p.root) and configured ~= p.database_dir)
+  then
     vim.schedule(function()
       if client.attached_buffers[event.buf] then
         reload_clangd(p, client)
@@ -91,6 +109,9 @@ local function write_atomic(dst, data)
 end
 
 function M.publish(p, config)
+  local environment = p.vs_env and p.env
+  local env_changed = not vim.deep_equal(p.clangd_env, environment)
+  p.clangd_env = environment
   local src = p.saved.dir .. "/compile_commands.json"
   local dst = p.root .. "/compile_commands.json"
   local stat, dest = uv.fs_stat(src), uv.fs_lstat(dst)
@@ -99,7 +120,7 @@ function M.publish(p, config)
       assert(uv.fs_unlink(dst))
       p.saved.database_hash = nil
     end
-    if p.database_dir then
+    if p.database_dir or env_changed then
       p.database_dir, p.database_signature = nil, nil
       reload_clangd(p)
     end
@@ -114,7 +135,7 @@ function M.publish(p, config)
     dest and dest.mtime.sec or "",
     dest and dest.mtime.nsec or "",
   }, "|")
-  if signature == p.database_signature then
+  if signature == p.database_signature and not env_changed then
     return p.database_warning
   end
 
@@ -138,7 +159,7 @@ function M.publish(p, config)
       warning = "Preserved " .. dst .. ". clangd will use " .. dir
     end
   end
-  if p.active_hash ~= hash or p.database_dir ~= dir then
+  if p.active_hash ~= hash or p.database_dir ~= dir or env_changed then
     p.active_hash, p.database_dir = hash, dir
     reload_clangd(p)
   end

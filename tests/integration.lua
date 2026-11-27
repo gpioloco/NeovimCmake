@@ -68,6 +68,20 @@ local function run()
   local project = require("neocmake.project")
   p = project.current()
   assert(p.root == root)
+  if windows and vim.env.NEOCMAKE_TEST_VISUAL_STUDIO then
+    plugin.setup({
+      select = function(items, _, callback)
+        for _, item in ipairs(items) do
+          if item.choice and item.choice.arch == "x64" then
+            return callback(item)
+          end
+        end
+        error("No installed Visual Studio x64 toolchain found")
+      end,
+    })
+    action("CMakeConfigureEnvironment")
+    assert(p.saved.visual_studio.arch == "x64")
+  end
   plugin.setup({ prefix = "<F8>" })
   assert(vim.fn.maparg("<F8>b", "n") ~= "")
   vim.cmd.CMakeConfigurePreset()

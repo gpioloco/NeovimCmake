@@ -54,6 +54,19 @@ function M.choose(p, options, items, prompt, current)
   return item
 end
 
+-- Environment discovery can return secrets. Keep these results out of the log
+-- and quickfix list, including when the child exits unsuccessfully.
+function M.probe(p, args, options)
+  local resume = p.task.resume
+  p.task.probe = vim.system(args, options, vim.schedule_wrap(resume))
+  local result = coroutine.yield()
+  p.task.probe = nil
+  if p.task.stopped then
+    error(cancelled)
+  end
+  return result
+end
+
 function M.exec(p, args, title, diagnostic_dir, env)
   local capture = diagnostic_dir ~= nil or title == "install"
   local command = "$ " .. table.concat(vim.tbl_map(vim.fn.shellescape, args), " ")

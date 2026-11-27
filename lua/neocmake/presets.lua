@@ -3,11 +3,11 @@
 local project = require("neocmake.project")
 local M = {}
 
-local function expand(text, context, env)
+local function expand(text, context, env, parent)
   return (
     text:gsub("%$(%a*){([^}]+)}", function(namespace, key)
       if namespace == "penv" then
-        return vim.env[key] or ""
+        return parent(key)
       end
       if namespace == "env" then
         return env(key)
@@ -19,7 +19,10 @@ local function expand(text, context, env)
   )
 end
 
-function M.metadata(root)
+function M.metadata(root, developer_env)
+  local function parent(key)
+    return (developer_env and developer_env[key:upper()]) or vim.env[key] or ""
+  end
   local builds, configs, visited = {}, {}, {}
   local context = {
     sourceDir = root,
@@ -40,9 +43,7 @@ function M.metadata(root)
     local doc = project.json(file)
     for _, inc in ipairs(doc.include or {}) do
       context.fileDir = vim.fs.dirname(file)
-      local path = expand(inc, context, function(k)
-        return vim.env[k] or ""
-      end)
+      local path = expand(inc, context, parent, parent)
       read(project.path(vim.fs.dirname(file), path))
     end
     for _, preset in ipairs(doc.buildPresets or {}) do
@@ -107,7 +108,7 @@ function M.metadata(root)
     local function resolve(k)
       local def = definitions[k]
       if not def or def.value == vim.NIL then
-        return vim.env[k] or ""
+        return parent(k)
       end
       if resolved[k] then
         return resolved[k]
@@ -120,7 +121,7 @@ function M.metadata(root)
         generator = generator,
         fileDir = vim.fs.dirname(file),
       })
-      resolved[k] = expand(def.value, scope, resolve)
+      resolved[k] = expand(def.value, scope, resolve, parent)
       visiting[k] = nil
       return resolved[k]
     end

@@ -39,7 +39,13 @@ The plugin registers its commands and default mappings automatically. To verify 
 
 ### Windows toolchain
 
-For **MSVC + Ninja**, install the **Desktop development with C++** workload from Visual Studio Build Tools and make sure `cmake` and `ninja` are on your path. Start Neovim from the **x64 Native Tools Command Prompt** so CMake inherits the compiler, linker, and Windows SDK environment. With MinGW-w64, start Neovim from a shell that has the toolchain’s `bin` directory on `PATH` so launched programs can find their runtime DLLs. [Microsoft's command-line setup guide](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line)
+For **MSVC + Ninja**, install **Desktop development with C++** and a Windows SDK through Visual Studio Installer. Both Visual Studio and standalone Build Tools installations are supported. Make sure Neovim can run `cmake`. [Microsoft’s command-line setup guide](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line)
+
+1. Start Neovim from a regular terminal and open your CMake project.
+2. Press **`<leader>mv`** or run **`:CMakeConfigureEnvironment`**. Choose the installation and target architecture, for example **Visual Studio Professional · x64**. The picker shows the version and installation path so you can distinguish side-by-side installs.
+3. Press **`<leader>mp`** to choose your Ninja preset, or **`<leader>mc`** to configure with the current settings. If the tree already caches a different compiler or predates the picker, choose **Re-detect compiler** to replace its CMake cache and `CMakeFiles` (requires CMake 3.24+). This is the option to use after a failed configure with a missing `kernel32.lib`.
+
+NeoCMake remembers the selection per project and loads the developer environment again on first use after restarting Neovim. Configure, build, run, install, and the project's clangd process receive the toolchain paths. Presets can still override environment variables. Use `:CMakeStatus` to check your selection. Choose **Inherit Neovim environment** to use the launching shell again, for example with a MinGW-w64 shell.
 
 Use a **Ninja**, **Ninja Multi-Config**, or **Makefiles** generator when you want CMake to produce `compile_commands.json` for clangd. The Visual Studio generator supports configuration-specific builds, but CMake only implements compilation database export for Ninja and Makefiles. [CMake compilation database support](https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_COMPILE_COMMANDS.html)
 
@@ -70,6 +76,7 @@ All mappings share the configurable prefix `<leader>m`. The **Key** column gives
 
 | Key | Command | Action |
 | --- | --- | --- |
+| `v` | `:CMakeConfigureEnvironment` | Choose a Visual Studio installation and target architecture on Windows |
 | `p` | `:CMakeConfigurePreset` | Choose and apply a configure preset |
 | `c` | `:CMakeConfigure` | Reconfigure the project and refresh its targets |
 | `P` | `:CMakeBuildPreset` | Choose a build preset compatible with the configure preset |
@@ -116,5 +123,7 @@ nvim --headless -u NONE -i NONE -c "luafile tests/integration.lua"
 ```
 
 To include your configured clangd in the test, omit `-u NONE` and set `NEOCMAKE_LOCAL_LSP=1` in the environment.
+
+On Windows, set `$env:NEOCMAKE_TEST_VISUAL_STUDIO = "1"` in a regular PowerShell terminal before running the integration test to exercise the first discovered x64 installation. To test switching between two fixture installations and restoring the choice across two Neovim processes, run `nvim --headless -u NONE -i NONE -l tests/visual_studio.lua`.
 
 The full workflow has been exercised on Linux, including a clangd hover check against the newly selected preset. The Windows sample was cross-built and installed as x64 PE executables and DLLs with LLVM-MinGW. The plugin's File API lookup located the `.exe`, and the binaries' import tables confirmed the dependency chain. Native Windows terminal interaction and an MSVC build still need verification on a Windows host.

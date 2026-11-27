@@ -3,6 +3,7 @@ local presets = require("neocmake.presets")
 local task = require("neocmake.task")
 local output = require("neocmake.output")
 local database = require("neocmake.database")
+local vs = require("neocmake.visual_studio")
 local M = {}
 local defaults = {
   prefix = "<leader>m",
@@ -15,8 +16,13 @@ local opts = defaults
 local actions = {}
 
 local function exec(p, args, title, diag_dir, env)
-  table.insert(args, 1, opts.cmake)
-  return task.exec(p, args, title, diag_dir, env)
+  return task.exec(
+    p,
+    vim.list_extend({ opts.cmake }, args),
+    title,
+    diag_dir,
+    vs.merge(vs.environment(p), env)
+  )
 end
 
 local function select_preset(p)
@@ -53,6 +59,8 @@ end
 
 local function refresh(p)
   p.model = project.model(p.saved.dir, p.model)
+  local preset_env = p.presets and p.presets.environment(p.saved.preset, p.model.generator.name)
+  p.env = vs.merge(p.vs_env, preset_env)
   local cfg = configuration(p)
   if p.saved.target and not cfg.targets[p.saved.target] then
     p.saved.target = nil
@@ -91,16 +99,19 @@ local function configure(p, requested_type)
   if use_preset and not p.saved.preset then
     select_preset(p)
   end
-  local args = { "-S", p.root, "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON", "--log-level=STATUS" }
+  local location = { "-S", p.root }
   local dir
   if use_preset then
-    vim.list_extend(args, { "--preset", p.saved.preset })
+    vim.list_extend(location, { "--preset", p.saved.preset })
     dir = p.saved.dir
   else
     p.saved.preset, p.saved.build_preset = nil, nil
     dir = project.path(p.root, opts.build_dir)
-    vim.list_extend(args, { "-B", dir })
+    vim.list_extend(location, { "-B", dir })
   end
+  local vs_dir, fresh = vs.prepare(p, opts, location)
+  dir = vs_dir or dir
+  local args = vim.list_extend(location, { "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON", "--log-level=STATUS" })
   local build_type = requested_type or p.saved.build_type
   if build_type ~= nil then
     table.insert(args, "-DCMAKE_BUILD_TYPE:STRING=" .. build_type)
@@ -108,7 +119,7 @@ local function configure(p, requested_type)
   if dir then
     project.query(dir)
   end
-  local lines = exec(p, args, "configure", p.root)
+  local lines = exec(p, fresh and vim.list_extend({ "--fresh" }, args) or args, "configure", p.root)
   -- Let CMake locate the tree. This also handles binaryDir inherited from an
   -- included preset, environment macros, and directories outside the project.
   for _, line in ipairs(lines) do
@@ -121,10 +132,12 @@ local function configure(p, requested_type)
   if project.query(dir) then
     exec(p, args, "read target model", p.root)
   end
+  if vs_dir then
+    vs.record(p, dir)
+  end
   p.saved.dir = dir
-  p.presets = use_preset and presets.metadata(p.root) or nil
+  p.presets = use_preset and presets.metadata(p.root, p.vs_env) or nil
   refresh(p)
-  p.env = p.presets and p.presets.environment(p.saved.preset, p.model.generator.name) or nil
 end
 
 local function ensure(p)
@@ -143,11 +156,15 @@ function actions.Configure(p)
   configure(p)
 end
 
+function actions.ConfigureEnvironment(p)
+  vs.select(p, opts)
+end
+
 function actions.BuildPreset(p)
   ensure(p)
   assert(p.saved.preset, "This project has no CMake presets")
   local list = presets.list(exec(p, { "--list-presets=build" }, "list build presets"))
-  p.presets = presets.metadata(p.root)
+  p.presets = presets.metadata(p.root, p.vs_env)
   local items = { { label = "Default build settings" } }
   for _, item in ipairs(list) do
     if p.presets.build(item.name) == p.saved.preset then
@@ -280,6 +297,7 @@ end
 
 -- Keep the old Ex names as aliases for existing mappings and scripts.
 local keys = {
+  { "v", "ConfigureEnvironment", "Configure · Select Visual Studio environment" },
   { "p", "ConfigurePreset", "Configure · Select preset", "Preset" },
   { "P", "BuildPreset", "Build · Select preset" },
   { "c", "Configure", "Configure · Configure project" },
@@ -313,6 +331,9 @@ local function invoke(name, args)
     if p.task and p.task.job then
       p.task.stopped = true
       vim.fn.jobstop(p.task.job)
+    elseif p.task and p.task.probe then
+      p.task.stopped = true
+      p.task.probe:kill(15)
     else
       vim.notify("No running CMake process")
     end
@@ -331,6 +352,7 @@ local function invoke(name, args)
         "Configuration: "
           .. (p.model and configuration(p).name or s.configuration or s.build_type or "default"),
         "Activity: " .. (p.task and p.task.action or "idle"),
+        vs.windows() and ("Visual Studio: " .. vs.label(s.visual_studio)) or nil,
       }, "\n"),
       nil,
       { title = "CMake" }
@@ -372,7 +394,7 @@ function M.setup(options)
     if alias then
       vim.api.nvim_create_user_command("CMake" .. alias, callback, options)
     end
-    if opts.prefix then
+    if opts.prefix and (name ~= "ConfigureEnvironment" or vs.windows()) then
       local lhs = opts.prefix .. suffix
       vim.keymap.set("n", lhs, "<Cmd>CMake" .. name .. "<CR>", { desc = description, silent = true })
       table.insert(installed, lhs)
